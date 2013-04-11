@@ -1,4 +1,3 @@
-#require 'curl'
 require 'tmpdir'
 
 module MCollective
@@ -12,22 +11,6 @@ module MCollective
                :url         => "http://github.com/binford2k/mco-peupgrade",
                :timeout     => 1800
 
-      # answers taken from finch's pe_upgrade
-      answers = "q_install=y
-q_puppet_cloud_install=n
-q_puppet_enterpriseconsole_install=n
-q_puppetagent_install=y
-q_puppetagent_server=`/opt/puppet/bin/puppet agent --configprint server `
-q_puppetagent_certname=`/opt/puppet/bin/puppet agent --configprint certname`
-q_puppetmaster_install=n
-q_rubydevelopment_install=n
-q_upgrade_install_wrapper_modules=n
-q_upgrade_installation=y
-q_upgrade_remove_mco_homedir=n
-q_vendor_packages_install=y
-q_puppet_symlinks_install=y
-q_continue_or_reenter_master_hostname=c\n"
-
       action "upgrade" do
         validate :version, /^[0-9]+\.[0-9]+\.[0-9]+$/
         version = request[:version]
@@ -36,14 +19,12 @@ q_continue_or_reenter_master_hostname=c\n"
 
         pid = fork do
           daemonize!('peupgrade')
-          
+
           Dir.mktmpdir("peupgrade-") do |dir|
-            #wtfbbq?
-            #Curl::Easy.download(source, dir)
             system("curl #{source} -o #{File.join(dir, "#{package}.tar.gz")}")
             system("tar -xzf #{File.join(dir, "#{package}.tar.gz")} -C #{dir}")
             Dir.chdir(File.join(dir, package))
-            File.open('answers.txt', 'w') { |f| f.write(answers) }
+            File.open('answers.txt', 'w') { |f| f.write(@answers) }
             # the output redirection is to catch errors before the installer starts logging
             system('./puppet-enterprise-upgrader -a answers.txt 2>&1 > peupgrade.lastrun.txt')
             Dir.glob('*.lastrun.*') { |f| FileUtils.cp(f, '/root') }
@@ -64,24 +45,22 @@ q_continue_or_reenter_master_hostname=c\n"
         version = '2.7.2' # hmm, no latest?
         package = package(version)
         source  = "https://s3.amazonaws.com/pe-builds/released/#{version}/#{package}.tar.gz"
-        
+
         opts = ''
         opts << '-d ' if request[:drop]
-        opts << '-p'  if request[:purge] 
+        opts << '-p'  if request[:purge]
 
         pid = fork do
           daemonize!('peuninstall')
-          
-          dir = Dir.mktmpdir('peupgrade-')# do |dir|
-            #wtfbbq?
-            #Curl::Easy.download(source, dir)
+
+          Dir.mktmpdir('peupgrade-') do |dir|
             system("curl #{source} -o #{File.join(dir, "#{package}.tar.gz")}")
             system("tar -xzf #{File.join(dir, "#{package}.tar.gz")} -C #{dir}")
             Dir.chdir(File.join(dir, package))
             # the output redirection is to catch errors before the installer starts logging
             system("./puppet-enterprise-uninstaller -y #{opts} 2>&1 > peuninstall.lastrun.txt")
             Dir.glob('*.lastrun.*') { |f| FileUtils.cp(f, '/root') }
-          #end
+          end
 
           exit
         end
@@ -89,7 +68,26 @@ q_continue_or_reenter_master_hostname=c\n"
         Process.detach(pid)
         reply[:msg] = "Forked a daemon with PID #{pid} to uninstall Puppet Enterprise."
       end
-      
+
+      def startup_hook
+        # answers taken from finch's pe_upgrade
+        @answers = "PATH=/usr/local/bin:/opt/puppet/bin:/usr/bin:$PATH
+        q_install=y
+        q_puppet_cloud_install=n
+        q_puppet_enterpriseconsole_install=n
+        q_puppetagent_install=y
+        q_puppetagent_server=`puppet agent --configprint server`
+        q_puppetagent_certname=`puppet agent --configprint certname`
+        q_puppetmaster_install=n
+        q_rubydevelopment_install=n
+        q_upgrade_install_wrapper_modules=n
+        q_upgrade_installation=y
+        q_upgrade_remove_mco_homedir=n
+        q_vendor_packages_install=y
+        q_puppet_symlinks_install=y
+        q_continue_or_reenter_master_hostname=c\n"
+      end
+
       def daemonize!(name)
         Process.setsid
 
@@ -99,13 +97,12 @@ q_continue_or_reenter_master_hostname=c\n"
         STDIN.reopen '/dev/null'
         STDOUT.reopen '/dev/null', 'a'
         STDERR.reopen '/dev/null', 'a'
-        
+
         $0 = name
       end
-      
+
       def package(version)
         begin
-          require 'facter'
           # This is yuk and a half. Do we really not have a better way to do this?
           # TODO: copy more of finch's logic in here. If these were facts....
           arch  = Facter.value('architecture')
@@ -126,7 +123,7 @@ q_continue_or_reenter_master_hostname=c\n"
           when 'Solaris'
             os = 'solaris'
           end
-          
+
           pkg = "puppet-enterprise-#{version}-#{os}-#{major}-#{arch}"
         rescue Exception
           # if anything goes wrong, just use the monolithic package
